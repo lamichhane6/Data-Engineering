@@ -1,0 +1,106 @@
+# ==============================================================================
+# Week 4 ETL Run Log
+# ==============================================================================
+# Question: Step (c) didn't duplicate anything, but Q1 showed the class ETL did.
+#           What changed? You didn't touch the dimension INSERT.
+#
+# Explanation:
+# In the class warehouse schema, dim_driver(driver_id) and dim_passenger(passenger_id)
+# lacked UNIQUE constraints. Although the SQL query had ON CONFLICT DO NOTHING,
+# Postgres without a unique constraint or index target could not detect conflicts
+# on the natural keys, so each execution inserted fresh rows with new serial
+# primary keys (driver_key, passenger_key).
+#
+# In warehouse_migration.sql (Part 2), we added explicit UNIQUE constraints:
+#   ALTER TABLE dim_driver ADD CONSTRAINT uq_dim_driver_driver_id UNIQUE (driver_id);
+#   ALTER TABLE dim_passenger ADD CONSTRAINT uq_dim_passenger_passenger_id UNIQUE (passenger_id);
+#
+# In etl_pipeline.py, load_dim() executes:
+#   INSERT INTO dim_driver (...) VALUES (...) ON CONFLICT (driver_id) DO NOTHING;
+# Because driver_id and passenger_id now have UNIQUE constraints, Postgres can
+# detect existing keys during conflict arbitration and skip insertion.
+# On the fact table, fact_trips has UNIQUE (source_trip_id) and uses
+# ON CONFLICT (source_trip_id) DO UPDATE, performing an idempotent upsert rather
+# than appending duplicates.
+# ==============================================================================
+
+# ------------------------------------------------------------------------------
+# (a) First run — Backfill with original Python round() (Revenue check FAILS)
+# ------------------------------------------------------------------------------
+$ psql -d ride_warehouse -f warehouse_migration.sql
+BEGIN
+UPDATE 5000
+DELETE 50
+UPDATE 5000
+DELETE 200
+ALTER TABLE
+ALTER TABLE
+ALTER TABLE
+UPDATE 10000
+COMMIT
+
+$ python etl_pipeline.py
+2026-10-12 08:35:10,102  INFO  Extracted 50 rows
+2026-10-12 08:35:10,121  INFO  0 inserted to dim_driver
+2026-10-12 08:35:10,140  INFO  Extracted 200 rows
+2026-10-12 08:35:10,158  INFO  0 inserted to dim_passenger
+2026-10-12 08:35:10,174  INFO  Extracted 100 rows
+2026-10-12 08:35:10,192  INFO  0 inserted to dim_location
+2026-10-12 08:35:10,205  INFO  Extracted 4 rows
+2026-10-12 08:35:10,218  INFO  0 inserted to dim_payment_method
+2026-10-12 08:35:10,229  INFO  Extracted 10 rows
+2026-10-12 08:35:10,242  INFO  0 inserted to dim_promo_code
+2026-10-12 08:35:10,312  INFO  Extracted 10000 rows
+2026-10-12 08:35:10,335  INFO  Loading lookup tables into memory
+2026-10-12 08:35:10,612  INFO  Transformed 10000 rows, skipped 0
+2026-10-12 08:35:12,845  INFO  10000 rows upserted to fact_trips
+2026-10-12 08:35:12,890  INFO  Check 1 [PASS] Dimension row counts match: drivers (src=50, dst=50), passengers (src=200, dst=200)
+2026-10-12 08:35:12,935  INFO  Check 2 [PASS] Trip counts per status match: source={'cancelled': 1489, 'completed': 7984, 'no_show': 527} vs warehouse={'cancelled': 1489, 'completed': 7984, 'no_show': 527}
+2026-10-12 08:35:12,982  ERROR Check 3 [FAIL] Completed revenue mismatch: source=656715.18 vs warehouse=656711.23 (diff: 3.95)
+2026-10-12 08:35:12,983  ERROR Reconciliation FAILED — warehouse does not match source
+
+# ------------------------------------------------------------------------------
+# (b) Second run — After fixing rounding in transform_trip() with Decimal(ROUND_HALF_UP)
+# ------------------------------------------------------------------------------
+$ python etl_pipeline.py
+2026-10-12 08:36:01,050  INFO  Extracted 50 rows
+2026-10-12 08:36:01,068  INFO  0 inserted to dim_driver
+2026-10-12 08:36:01,085  INFO  Extracted 200 rows
+2026-10-12 08:36:01,102  INFO  0 inserted to dim_passenger
+2026-10-12 08:36:01,118  INFO  Extracted 100 rows
+2026-10-12 08:36:01,134  INFO  0 inserted to dim_location
+2026-10-12 08:36:01,146  INFO  Extracted 4 rows
+2026-10-12 08:36:01,159  INFO  0 inserted to dim_payment_method
+2026-10-12 08:36:01,170  INFO  Extracted 10 rows
+2026-10-12 08:36:01,183  INFO  0 inserted to dim_promo_code
+2026-10-12 08:36:01,248  INFO  Extracted 10000 rows
+2026-10-12 08:36:01,270  INFO  Loading lookup tables into memory
+2026-10-12 08:36:01,580  INFO  Transformed 10000 rows, skipped 0
+2026-10-12 08:36:03,790  INFO  10000 rows upserted to fact_trips
+2026-10-12 08:36:03,835  INFO  Check 1 [PASS] Dimension row counts match: drivers (src=50, dst=50), passengers (src=200, dst=200)
+2026-10-12 08:36:03,878  INFO  Check 2 [PASS] Trip counts per status match: source={'cancelled': 1489, 'completed': 7984, 'no_show': 527} vs warehouse={'cancelled': 1489, 'completed': 7984, 'no_show': 527}
+2026-10-12 08:36:03,924  INFO  Check 3 [PASS] Completed revenue matches: source=656715.18 vs warehouse=656715.18
+2026-10-12 08:36:03,925  INFO  Reconciliation passed
+
+# ------------------------------------------------------------------------------
+# (c) Third run — Re-running pipeline to verify idempotency and zero duplicates
+# ------------------------------------------------------------------------------
+$ python etl_pipeline.py
+2026-10-12 08:36:45,110  INFO  Extracted 50 rows
+2026-10-12 08:36:45,128  INFO  0 inserted to dim_driver
+2026-10-12 08:36:45,145  INFO  Extracted 200 rows
+2026-10-12 08:36:45,162  INFO  0 inserted to dim_passenger
+2026-10-12 08:36:45,178  INFO  Extracted 100 rows
+2026-10-12 08:36:45,195  INFO  0 inserted to dim_location
+2026-10-12 08:36:45,207  INFO  Extracted 4 rows
+2026-10-12 08:36:45,220  INFO  0 inserted to dim_payment_method
+2026-10-12 08:36:45,231  INFO  Extracted 10 rows
+2026-10-12 08:36:45,244  INFO  0 inserted to dim_promo_code
+2026-10-12 08:36:45,308  INFO  Extracted 10000 rows
+2026-10-12 08:36:45,330  INFO  Loading lookup tables into memory
+2026-10-12 08:36:45,640  INFO  Transformed 10000 rows, skipped 0
+2026-10-12 08:36:47,850  INFO  10000 rows upserted to fact_trips
+2026-10-12 08:36:47,895  INFO  Check 1 [PASS] Dimension row counts match: drivers (src=50, dst=50), passengers (src=200, dst=200)
+2026-10-12 08:36:47,938  INFO  Check 2 [PASS] Trip counts per status match: source={'cancelled': 1489, 'completed': 7984, 'no_show': 527} vs warehouse={'cancelled': 1489, 'completed': 7984, 'no_show': 527}
+2026-10-12 08:36:47,985  INFO  Check 3 [PASS] Completed revenue matches: source=656715.18 vs warehouse=656715.18
+2026-10-12 08:36:47,986  INFO  Reconciliation passed
