@@ -24,6 +24,7 @@ Run from Week4/assignment/:
 import logging
 import os
 import sys
+from decimal import Decimal, ROUND_HALF_UP
 
 import psycopg2
 from psycopg2 import sql
@@ -276,10 +277,17 @@ def transform_trip(trip_data, lookups):
             skipped += 1
             continue
 
-        # TODO (P1): compute time_key — HHMM of requested_at, minutes rounded DOWN
+        # (P1): compute time_key — HHMM of requested_at, minutes rounded DOWN
         # to the 15-minute bucket (14:37 -> 1430, 09:05 -> 900, 00:59 -> 45).
         # Skip + warn (like date_key above) if it isn't in lookups["time"].
-        time_key = None
+        hour = row["requested_at"].hour
+        minute = row["requested_at"].minute
+        minute_bucket = (minute // 15) * 15
+        time_key = hour * 100 + minute_bucket
+        if time_key not in lookups["time"]:
+            logger.warning(f"trip {trip_id}: time_key {time_key} outside of dim_time range — skipped")
+            skipped += 1
+            continue
 
         driver_key = lookups["driver"].get(row["driver_id"])
         if driver_key is None:
@@ -321,12 +329,13 @@ def transform_trip(trip_data, lookups):
                 skipped += 1
                 continue
 
-        # computed column
-        base_fare = row["base_fare"] or 0
-        tip_amount = row["tip_amount"] or 0
-        surge_multiplier = row["surge_multiplier"] or 0
-        discount_amount = row["discount_amount"] or 0
-        fare_amount = round(base_fare * surge_multiplier + tip_amount - discount_amount, 2)
+        # computed column (using Decimal with ROUND_HALF_UP to match Postgres ROUND(..., 2))
+        base_fare = Decimal(str(row["base_fare"] or 0))
+        tip_amount = Decimal(str(row["tip_amount"] or 0))
+        surge_multiplier = Decimal(str(row["surge_multiplier"] or 0))
+        discount_amount = Decimal(str(row["discount_amount"] or 0))
+        raw_fare = (base_fare * surge_multiplier) + tip_amount - discount_amount
+        fare_amount = raw_fare.quantize(Decimal("0.01"), rounding=ROUND_HALF_UP)
 
         duration_minutes = None
         if row["status"] == "completed" and row["completed_at"]:
@@ -343,8 +352,8 @@ def transform_trip(trip_data, lookups):
             "dropoff_location_key": dropoff_location_key,
             "payment_method_key":   payment_method_key,
             "promo_code_key":       promo_code_key,
-            "trip_status":          None,   # TODO (P1)
-            "cancelled_by":         None,   # TODO (P1)
+            "trip_status":          row["status"],
+            "cancelled_by":         row.get("cancelled_by"),
             "base_fare":            base_fare,
             "tip_amount":           tip_amount,
             "discount_amount":      discount_amount,
@@ -427,8 +436,72 @@ def reconcile(src_conn, dst_conn):
         True if every check passed, False otherwise. Don't raise on a mismatch —
         log it with both numbers so whoever reads the log can see how far off it is.
     """
-    # TODO (P2)
-    raise NotImplementedError("P2: implement reconcile()")
+    all_ok = True
+
+    with src_conn.cursor() as s_cur, dst_conn.cursor() as d_cur:
+        # Check 1: Dimension row counts
+        s_cur.execute("SELECT count(*) FROM drivers")
+        src_drivers = s_cur.fetchone()[0]
+        d_cur.execute("SELECT count(*) FROM dim_driver")
+        dst_drivers = d_cur.fetchone()[0]
+
+        s_cur.execute("SELECT count(*) FROM passengers")
+        src_passengers = s_cur.fetchone()[0]
+        d_cur.execute("SELECT count(*) FROM dim_passenger")
+        dst_passengers = d_cur.fetchone()[0]
+
+        if src_drivers == dst_drivers and src_passengers == dst_passengers:
+            logger.info(
+                f"Check 1 [PASS] Dimension row counts match: "
+                f"drivers (src={src_drivers}, dst={dst_drivers}), "
+                f"passengers (src={src_passengers}, dst={dst_passengers})"
+            )
+        else:
+            logger.error(
+                f"Check 1 [FAIL] Dimension row count mismatch: "
+                f"drivers (src={src_drivers}, dst={dst_drivers}), "
+                f"passengers (src={src_passengers}, dst={dst_passengers})"
+            )
+            all_ok = False
+
+        # Check 2: Trip count per status
+        s_cur.execute("SELECT status, count(*) FROM trips GROUP BY status ORDER BY status")
+        src_status_counts = dict(s_cur.fetchall())
+        d_cur.execute("SELECT trip_status, count(*) FROM fact_trips GROUP BY trip_status ORDER BY trip_status")
+        dst_status_counts = dict(d_cur.fetchall())
+
+        if src_status_counts == dst_status_counts:
+            logger.info(
+                f"Check 2 [PASS] Trip counts per status match: "
+                f"source={src_status_counts} vs warehouse={dst_status_counts}"
+            )
+        else:
+            logger.error(
+                f"Check 2 [FAIL] Trip counts per status mismatch: "
+                f"source={src_status_counts} vs warehouse={dst_status_counts}"
+            )
+            all_ok = False
+
+        # Check 3: Completed revenue to the cent
+        s_cur.execute("SELECT COALESCE(SUM(fare_amount), 0.00) FROM v_trips WHERE status = 'completed'")
+        src_revenue = Decimal(str(s_cur.fetchone()[0]))
+        d_cur.execute("SELECT COALESCE(SUM(fare_amount), 0.00) FROM fact_trips WHERE trip_status = 'completed'")
+        dst_revenue = Decimal(str(d_cur.fetchone()[0]))
+
+        if src_revenue == dst_revenue:
+            logger.info(
+                f"Check 3 [PASS] Completed revenue matches: "
+                f"source={src_revenue} vs warehouse={dst_revenue}"
+            )
+        else:
+            diff = abs(src_revenue - dst_revenue)
+            logger.error(
+                f"Check 3 [FAIL] Completed revenue mismatch: "
+                f"source={src_revenue} vs warehouse={dst_revenue} (diff: {diff})"
+            )
+            all_ok = False
+
+    return all_ok
 
 
 # ─────────────────────────────────────────────────────────────────────────────

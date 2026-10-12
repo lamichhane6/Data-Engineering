@@ -124,6 +124,7 @@ Q2 Written Answers:
 -- Q3 — Averages of averages (Intermediate · semi-additive measures)
 -- ════════════════════════════════════════════════════════════════════════════
 -- Per year: true_avg_rating, avg_of_monthly_avgs, rated_trips, total_trips — in one query:
+
  WITH monthly_aggregates AS
   (SELECT d.year,
           d.month,

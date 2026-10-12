@@ -19,6 +19,7 @@ duplicates AS (
     JOIN survivors s ON d.driver_id = s.driver_id
     WHERE d.driver_key <> s.keeper_key
 )
+
 UPDATE fact_trips f
 SET driver_key = d.keeper_key
 FROM duplicates d
